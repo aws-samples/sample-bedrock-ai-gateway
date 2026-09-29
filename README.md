@@ -794,17 +794,6 @@ Running `npm audit` on the frontend reveals **15 known vulnerabilities** in tran
 
 ---
 
-## Contributors
-
-- **Adrian Coulibaly**
-
-## Acknowledgements
-
-Inspired by the AWS blog post [Building an AI gateway to Amazon Bedrock with Amazon API Gateway](https://aws.amazon.com/blogs/architecture/building-an-ai-gateway-to-amazon-bedrock-with-amazon-api-gateway/). Thanks to Sonar Patel for contributions and guidance.
-
----
-
 ## License
 
 This project is licensed under the Apache-2.0 License.
-ok

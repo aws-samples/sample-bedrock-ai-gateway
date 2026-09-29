@@ -1,0 +1,449 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'AI Gateway POC - Custom Lambda MCP Tools + OpenSearch Collection (Phase 1)'
+
+Parameters:
+  Stage:
+    Type: String
+    Default: poc
+    Description: Deployment stage name
+  CompanyName:
+    Type: String
+    Default: anycompany
+    Description: Company name prefix for resource names
+
+Resources:
+  # S3 Bucket for Knowledge Base source documents
+  KBSourceBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'ai-gateway-kb-docs-${AWS::AccountId}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+      Tags:
+        - Key: Application
+          Value: AIGatewayPOC
+        - Key: CostCenter
+          Value: IT-Operations
+    Metadata:
+      guard:
+        SuppressedRules:
+          - S3_BUCKET_DEFAULT_LOCK_ENABLED  # Object Lock unsuitable for an actively-updated KB docs bucket. Enable for WORM-compliance buckets.
+          - S3_BUCKET_NO_PUBLIC_RW_ACL      # AccessControl property omitted intentionally — defaults to private. PublicAccessBlockConfiguration enforces no-ACL policy.
+          - S3_BUCKET_SSL_REQUESTS_ONLY     # DenyInsecureTransport statement present in the companion KBSourceBucketPolicy resource.
+      cfn_nag:
+        rules_to_suppress:
+          - id: W35
+            reason: >
+              Access logging requires a separate S3 logging bucket. Omitted to
+              keep the sample self-contained. Enable in production.
+      checkov:
+        skip:
+          - id: CKV_AWS_18
+            comment: Access logging requires a separate logging bucket. Enable in production.
+          - id: CKV_AWS_21
+            comment: >
+              Versioning is enabled. Suppressing scanner noise — some versions
+              of Checkov flag this rule even when versioning is present.
+
+  KBSourceBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref KBSourceBucket
+      PolicyDocument:
+        Statement:
+          - Sid: AllowBedrockAccess
+            Effect: Allow
+            Principal:
+              Service: bedrock.amazonaws.com
+            Action:
+              - s3:GetObject
+              - s3:ListBucket
+            Resource:
+              - !GetAtt KBSourceBucket.Arn
+              - !Sub '${KBSourceBucket.Arn}/*'
+            Condition:
+              StringEquals:
+                'aws:SourceAccount': !Ref 'AWS::AccountId'
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt KBSourceBucket.Arn
+              - !Sub '${KBSourceBucket.Arn}/*'
+            Condition:
+              Bool:
+                'aws:SecureTransport': 'false'
+
+  # IAM Role for Knowledge Base (kept for Phase 2 KB creation)
+  KBRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-kb-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: bedrock.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                'aws:SourceAccount': !Ref 'AWS::AccountId'
+      Policies:
+        - PolicyName: KBSourceAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt KBSourceBucket.Arn
+                  - !Sub '${KBSourceBucket.Arn}/*'
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                Resource: '*'
+        - PolicyName: OpenSearchAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - aoss:APIAccessAll
+                Resource: !Sub 'arn:aws:aoss:${AWS::Region}:${AWS::AccountId}:collection/*'
+    Metadata:
+      guard:
+        SuppressedRules:
+          - IAM_NO_INLINE_POLICY_CHECK  # Inline policies keep this sample self-contained. Extract to AWS::IAM::ManagedPolicy resources in production.
+      cfn_nag:
+        rules_to_suppress:
+          - id: W28
+            reason: Explicit name required so teardown scripts can reference the role.
+          - id: W11
+            reason: >
+              Bedrock does not support resource-level ARNs on InvokeModel.
+              Resource: '*' is the only valid value per AWS documentation.
+
+  # OpenSearch Serverless Collection for KB vector store
+  KBCollection:
+    Type: AWS::OpenSearchServerless::Collection
+    DependsOn:
+      - KBEncryptionPolicy
+      - KBNetworkPolicy
+      - KBDataAccessPolicy
+    Properties:
+      Name: !Sub '${CompanyName}-kb-${Stage}'
+      Description: Vector store for AI Gateway KB
+      Type: VECTORSEARCH
+      Tags:
+        - Key: Application
+          Value: AIGatewayPOC
+        - Key: CostCenter
+          Value: IT-Operations
+
+  KBEncryptionPolicy:
+    Type: AWS::OpenSearchServerless::SecurityPolicy
+    Properties:
+      Name: !Sub '${CompanyName}-kb-enc-${Stage}'
+      Type: encryption
+      Policy: !Sub >-
+        {"Rules":[{"ResourceType":"collection","Resource":["collection/${CompanyName}-kb-${Stage}"]}],"AWSOwnedKey":true}
+
+  KBNetworkPolicy:
+    Type: AWS::OpenSearchServerless::SecurityPolicy
+    Properties:
+      Name: !Sub '${CompanyName}-kb-net-${Stage}'
+      Type: network
+      Policy: !Sub >-
+        [{"Rules":[{"ResourceType":"collection","Resource":["collection/${CompanyName}-kb-${Stage}"]},{"ResourceType":"dashboard","Resource":["collection/${CompanyName}-kb-${Stage}"]}],"AllowFromPublic":true}]
+
+  KBDataAccessPolicy:
+    Type: AWS::OpenSearchServerless::AccessPolicy
+    Properties:
+      Name: !Sub '${CompanyName}-kb-access-${Stage}'
+      Type: data
+      Policy: !Sub >-
+        [{"Rules":[{"ResourceType":"index","Resource":["index/${CompanyName}-kb-${Stage}/*"],"Permission":["aoss:CreateIndex","aoss:UpdateIndex","aoss:DescribeIndex","aoss:ReadDocument","aoss:WriteDocument"]},{"ResourceType":"collection","Resource":["collection/${CompanyName}-kb-${Stage}"],"Permission":["aoss:CreateCollectionItems","aoss:DescribeCollectionItems","aoss:UpdateCollectionItems"]}],"Principal":["${KBRole.Arn}","arn:aws:iam::${AWS::AccountId}:root"]}]
+
+  # search_kb Lambda Function
+  SearchKBFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-search-kb'
+      Handler: index.handler
+      Runtime: python3.12
+      Timeout: 30
+      MemorySize: 256
+      Role: !GetAtt SearchKBRole.Arn
+      Code:
+        ZipFile: |
+          import os
+          import json
+          import boto3
+
+          bedrock_agent = boto3.client('bedrock-agent-runtime')
+          KB_ID = os.environ.get('KNOWLEDGE_BASE_ID')
+
+          def handler(event, context):
+              try:
+                  print(f"[search_kb] REQUEST: {json.dumps(event)}")
+
+                  if isinstance(event.get('arguments'), dict):
+                      query = event['arguments'].get('query', '')
+                  elif isinstance(event.get('body'), str):
+                      body = json.loads(event['body'])
+                      query = body.get('query', '')
+                  else:
+                      query = event.get('query', '')
+
+                  if not query:
+                      return {'statusCode': 400, 'body': json.dumps({'error': 'Missing required parameter: query'})}
+
+                  if not KB_ID or KB_ID == 'PENDING_PHASE2':
+                      return {'statusCode': 503, 'body': json.dumps({'error': 'Knowledge Base not yet configured. Run Phase 2 deployment.'})}
+
+                  response = bedrock_agent.retrieve(
+                      knowledgeBaseId=KB_ID,
+                      retrievalQuery={'text': query},
+                      retrievalConfiguration={'vectorSearchConfiguration': {'numberOfResults': 5}}
+                  )
+
+                  results = []
+                  for r in response.get('retrievalResults', []):
+                      results.append({
+                          'text': r.get('content', {}).get('text', '')[:500],
+                          'score': str(round(r.get('score', 0.0), 4)),
+                          'source': r.get('location', {}).get('s3Location', {}).get('uri', 'unknown')
+                      })
+
+                  result = {'results': results, 'count': len(results)}
+                  print(f"[search_kb] RESPONSE: {json.dumps(result)}")
+                  return result
+              except Exception as e:
+                  print(f"[search_kb] ERROR: {str(e)}")
+                  return {'statusCode': 500, 'body': json.dumps({'error': str(e)})}
+      Environment:
+        Variables:
+          KNOWLEDGE_BASE_ID: PENDING_PHASE2
+      Tags:
+        - Key: Application
+          Value: AIGatewayPOC
+        - Key: CostCenter
+          Value: IT-Operations
+    Metadata:
+      guard:
+        SuppressedRules:
+          - LAMBDA_DLQ_CHECK  # Synchronously invoked via AgentCore/API Gateway — failures surface to the caller. DLQ only applies to async invocation paths.
+      cfn_nag:
+        rules_to_suppress:
+          - id: W89
+            reason: Sample project has no VPC. Add VPC + private subnets in production.
+          - id: W92
+            reason: No concurrent limit set — sample project. Set in production.
+      checkov:
+        skip:
+          - id: CKV_AWS_117
+            comment: No VPC in this sample. Add VPC + private subnets in production.
+          - id: CKV_AWS_115
+            comment: No concurrent limit — sample project. Set in production.
+          - id: CKV_AWS_116
+            comment: Synchronously invoked Lambda — DLQ only applies to async paths.
+          - id: CKV_AWS_173
+            comment: No secrets in env vars — only KB ID. Enable KMS in production.
+
+  SearchKBRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: SearchKBLambdaLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AWS::StackName}-search-kb:*'
+        - PolicyName: BedrockKBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:Retrieve
+                Resource: !Sub 'arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:knowledge-base/*'
+    Metadata:
+      guard:
+        SuppressedRules:
+          - IAM_NO_INLINE_POLICY_CHECK  # Inline policies keep this sample self-contained. Extract to AWS::IAM::ManagedPolicy resources in production.
+      cfn_nag:
+        rules_to_suppress: []
+  CreateTicketFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-create-ticket'
+      Handler: index.handler
+      Runtime: python3.12
+      Timeout: 10
+      MemorySize: 128
+      Role: !GetAtt CreateTicketRole.Arn
+      Code:
+        ZipFile: |
+          import json
+          from datetime import datetime, timezone
+
+          def handler(event, context):
+              try:
+                  print(f"[create_ticket] REQUEST: {json.dumps(event)}")
+
+                  if isinstance(event.get('arguments'), dict):
+                      args = event['arguments']
+                  elif isinstance(event.get('body'), str):
+                      args = json.loads(event['body'])
+                  else:
+                      args = event
+
+                  title = args.get('title', '')
+                  priority = args.get('priority', '')
+                  description = args.get('description', '')
+
+                  if not title:
+                      return {'statusCode': 400, 'body': json.dumps({'error': 'Missing: title'})}
+                  if priority not in ['P1', 'P2', 'P3', 'P4']:
+                      return {'statusCode': 400, 'body': json.dumps({'error': 'Invalid priority'})}
+
+                  now = datetime.now(timezone.utc)
+                  result = {
+                      'ticket_id': f"INC{now.strftime('%Y%m%d%H%M%S')}",
+                      'title': title,
+                      'priority': priority,
+                      'description': description,
+                      'status': 'created',
+                      'assigned_to': 'IT-Operations-Queue',
+                      'created_at': now.isoformat()
+                  }
+                  print(f"[create_ticket] RESPONSE: {json.dumps(result)}")
+                  return result
+              except Exception as e:
+                  print(f"[create_ticket] ERROR: {str(e)}")
+                  return {'statusCode': 500, 'body': json.dumps({'error': str(e)})}
+      Tags:
+        - Key: Application
+          Value: AIGatewayPOC
+        - Key: CostCenter
+          Value: IT-Operations
+    Metadata:
+      guard:
+        SuppressedRules:
+          - LAMBDA_DLQ_CHECK  # Synchronously invoked via AgentCore/API Gateway — failures surface to the caller. DLQ only applies to async invocation paths.
+      cfn_nag:
+        rules_to_suppress:
+          - id: W89
+            reason: Sample project has no VPC. Add VPC + private subnets in production.
+          - id: W92
+            reason: No concurrent limit set — sample project. Set in production.
+      checkov:
+        skip:
+          - id: CKV_AWS_117
+            comment: No VPC in this sample. Add VPC + private subnets in production.
+          - id: CKV_AWS_115
+            comment: No concurrent limit — sample project. Set in production.
+          - id: CKV_AWS_116
+            comment: Synchronously invoked Lambda — DLQ only applies to async paths.
+          - id: CKV_AWS_173
+            comment: No secrets in env vars. Enable KMS in production.
+
+  CreateTicketRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CreateTicketLambdaLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AWS::StackName}-create-ticket:*'
+    Metadata:
+      guard:
+        SuppressedRules:
+          - IAM_NO_INLINE_POLICY_CHECK  # Inline policies keep this sample self-contained. Extract to AWS::IAM::ManagedPolicy resources in production.
+      cfn_nag:
+        rules_to_suppress: []
+
+Outputs:
+  SearchKBLambdaArn:
+    Description: ARN of search_kb Lambda function
+    Value: !GetAtt SearchKBFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-SearchKBLambdaArn'
+
+  CreateTicketLambdaArn:
+    Description: ARN of create_ticket Lambda function
+    Value: !GetAtt CreateTicketFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-CreateTicketLambdaArn'
+
+  KnowledgeBaseId:
+    Description: Placeholder - KB will be created in Phase 2 after OpenSearch collection is ACTIVE
+    Value: PENDING_PHASE2
+    Export:
+      Name: !Sub '${AWS::StackName}-KnowledgeBaseId'
+
+  KBSourceBucketName:
+    Description: S3 bucket for Knowledge Base source documents
+    Value: !Ref KBSourceBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-KBSourceBucket'
+
+  KBSourceBucketArn:
+    Description: ARN of KB source bucket
+    Value: !GetAtt KBSourceBucket.Arn
+
+  KBRoleArn:
+    Description: ARN of the KB IAM role (used by Phase 2 to create the Knowledge Base)
+    Value: !GetAtt KBRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-KBRoleArn'
+
+  OpenSearchCollectionArn:
+    Description: ARN of the OpenSearch Serverless collection (used by Phase 2 for KB storage config)
+    Value: !GetAtt KBCollection.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-OpenSearchCollectionArn'
+
+  OpenSearchCollectionEndpoint:
+    Description: Endpoint of the OpenSearch Serverless collection
+    Value: !GetAtt KBCollection.CollectionEndpoint
+    Export:
+      Name: !Sub '${AWS::StackName}-OpenSearchCollectionEndpoint'

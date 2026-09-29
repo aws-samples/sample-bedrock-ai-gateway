@@ -1,0 +1,9 @@
+{
+  "name": "AIGateway-POC",
+  "tags": {
+    "Application": "AIGatewayPOC",
+    "Environment": "POC",
+    "Team": "Architecture",
+    "CostCenter": "IT-Operations"
+  }
+}

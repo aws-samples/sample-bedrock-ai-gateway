@@ -1,0 +1,149 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Frontend hosting for AI Gateway POC (S3 + CloudFront)'
+
+Resources:
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'ai-gateway-frontend-${AWS::AccountId}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+    Metadata:
+      guard:
+        SuppressedRules:
+          - S3_BUCKET_DEFAULT_LOCK_ENABLED    # Object Lock unsuitable for an actively-deployed static site. Enable for WORM-compliance buckets.
+          - S3_BUCKET_NO_PUBLIC_RW_ACL        # AccessControl property omitted intentionally — defaults to private. PublicAccessBlockConfiguration enforces no-ACL policy.
+          - S3_BUCKET_SSL_REQUESTS_ONLY       # DenyInsecureTransport statement present in the companion BucketPolicy resource below.
+      cfn_nag:
+        rules_to_suppress:
+          - id: W35
+            reason: >
+              Access logging requires a separate S3 logging bucket. Omitted to
+              keep the sample self-contained. Enable in production.
+      checkov:
+        skip:
+          - id: CKV_AWS_18
+            comment: >
+              Access logging requires a separate S3 logging bucket. Omitted to
+              keep the sample self-contained. Enable in production.
+          - id: CKV_AWS_21
+            comment: >
+              Versioning is enabled. Suppressing scanner noise — some versions
+              of Checkov flag this rule even when versioning is present.
+
+  CloudFrontOAI:
+    Type: AWS::CloudFront::CloudFrontOriginAccessIdentity
+    Properties:
+      CloudFrontOriginAccessIdentityConfig:
+        Comment: !Sub 'OAI for ${FrontendBucket}'
+
+  BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FrontendBucket
+      PolicyDocument:
+        Statement:
+          - Sid: AllowCloudFrontAccess
+            Effect: Allow
+            Principal:
+              CanonicalUser: !GetAtt CloudFrontOAI.S3CanonicalUserId
+            Action: 's3:GetObject'
+            Resource: !Sub '${FrontendBucket.Arn}/*'
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt FrontendBucket.Arn
+              - !Sub '${FrontendBucket.Arn}/*'
+            Condition:
+              Bool:
+                'aws:SecureTransport': 'false'
+    Metadata:
+      guard:
+        SuppressedRules:
+          - S3_BUCKET_SSL_REQUESTS_ONLY  # DenyInsecureTransport deny statement is present above. cfn-guard reports this at the template root when its cross-resource correlation fails to match bucket to policy.
+
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        DefaultRootObject: index.html
+        Origins:
+          - Id: S3Origin
+            DomainName: !GetAtt FrontendBucket.RegionalDomainName
+            S3OriginConfig:
+              OriginAccessIdentity: !Sub 'origin-access-identity/cloudfront/${CloudFrontOAI}'
+        DefaultCacheBehavior:
+          TargetOriginId: S3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD, OPTIONS]
+          CachedMethods: [GET, HEAD]
+          ForwardedValues:
+            QueryString: false
+            Cookies:
+              Forward: none
+          Compress: true
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+          - ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+        PriceClass: PriceClass_100
+        ViewerCertificate:
+          CloudFrontDefaultCertificate: true
+    Metadata:
+      guard:
+        SuppressedRules:
+          - CLOUDFRONT_CUSTOM_SSL_CERTIFICATE  # CloudFrontDefaultCertificate and MinimumProtocolVersion are mutually exclusive. Custom domain + ACM cert required in production.
+      cfn_nag:
+        rules_to_suppress:
+          - id: W70
+            reason: >
+              MinimumProtocolVersion cannot be set with CloudFrontDefaultCertificate.
+              Requires a custom ACM certificate. CloudFront default cert enforces
+              TLS 1.2+ for all modern clients. Use a custom ACM cert in production.
+          - id: W10
+            reason: >
+              CloudFront access logging requires a dedicated S3 logging bucket.
+              Omitted to keep the sample self-contained. Enable in production.
+      checkov:
+        skip:
+          - id: CKV_AWS_174
+            comment: >
+              MinimumProtocolVersion cannot be set with CloudFrontDefaultCertificate.
+              Requires a custom ACM certificate. CloudFront default cert enforces
+              TLS 1.2+ for modern clients. Use a custom ACM cert in production.
+          - id: CKV_AWS_86
+            comment: >
+              CloudFront access logging requires a dedicated S3 logging bucket.
+              Omitted to keep the sample self-contained. Enable in production.
+          - id: CKV_AWS_68
+            comment: >
+              WAF costs ~$5/month minimum. Not appropriate for a sample project.
+              Enable WAF in production.
+
+Outputs:
+  CloudFrontURL:
+    Description: CloudFront Distribution Domain URL
+    Value: !GetAtt CloudFrontDistribution.DomainName
+
+  CloudFrontDistributionId:
+    Description: CloudFront Distribution ID
+    Value: !Ref CloudFrontDistribution
+
+  BucketName:
+    Description: S3 Bucket for frontend files
+    Value: !Ref FrontendBucket

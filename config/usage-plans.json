@@ -1,0 +1,20 @@
+{
+  "usagePlan": {
+    "name": "IT-Operations-Plan",
+    "description": "Rate limiting plan for AI Gateway POC — 100 requests/sec steady-state, 150 requests/sec burst",
+    "throttle": {
+      "rateLimit": 100,
+      "burstLimit": 150
+    },
+    "quota": {
+      "limit": 10000,
+      "period": "DAY"
+    }
+  },
+  "apiKeys": [
+    {
+      "name": "IT-Operations-key",
+      "description": "Architecture team API key for AI Gateway access"
+    }
+  ]
+}

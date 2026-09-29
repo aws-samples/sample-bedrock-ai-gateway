@@ -1,0 +1,22 @@
+{
+  "userPool": {
+    "name": "AIGatewayPOC-UserPool",
+    "autoVerifiedAttributes": ["email"],
+    "domain": "ai-gateway-poc",
+    "schema": [
+      { "name": "email", "required": true },
+      { "name": "custom:team", "mutable": true },
+      { "name": "custom:role", "mutable": true }
+    ]
+  },
+  "appClient": {
+    "name": "AIGatewayPOC",
+    "explicitAuthFlows": ["ALLOW_REFRESH_TOKEN_AUTH"],
+    "allowedOAuthFlows": ["code"],
+    "allowedOAuthScopes": ["openid", "profile", "email"],
+    "callbackURLs": ["https://<cloudfront-domain>/callback"],
+    "logoutURLs": ["https://<cloudfront-domain>"],
+    "supportedIdentityProviders": ["COGNITO"],
+    "generateSecret": false
+  }
+}

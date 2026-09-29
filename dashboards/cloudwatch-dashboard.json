@@ -1,0 +1,366 @@
+{
+  "widgets": [
+    {
+      "type": "text",
+      "x": 0,
+      "y": 0,
+      "width": 24,
+      "height": 1,
+      "properties": {
+        "markdown": "# AI Gateway \u2014 Observability Dashboard"
+      }
+    },
+    {
+      "type": "metric",
+      "x": 0,
+      "y": 1,
+      "width": 8,
+      "height": 3,
+      "properties": {
+        "title": "Invocations",
+        "view": "singleValue",
+        "region": "${AWS::Region}",
+        "setPeriodToTimeRange": true,
+        "metrics": [
+          [
+            "AWS/Bedrock",
+            "Invocations",
+            "ModelId",
+            "us.anthropic.claude-sonnet-4-6",
+            {
+              "stat": "Sum",
+              "label": "Claude Sonnet 4.6"
+            }
+          ]
+        ],
+        "stat": "Sum"
+      }
+    },
+    {
+      "type": "metric",
+      "x": 8,
+      "y": 1,
+      "width": 8,
+      "height": 3,
+      "properties": {
+        "title": "Latency p50 / p95",
+        "view": "singleValue",
+        "region": "${AWS::Region}",
+        "setPeriodToTimeRange": true,
+        "metrics": [
+          [
+            "AWS/Bedrock",
+            "InvocationLatency",
+            "ModelId",
+            "us.anthropic.claude-sonnet-4-6",
+            {
+              "stat": "p50",
+              "label": "p50 (ms)"
+            }
+          ],
+          [
+            "AWS/Bedrock",
+            "InvocationLatency",
+            "ModelId",
+            "us.anthropic.claude-sonnet-4-6",
+            {
+              "stat": "p95",
+              "label": "p95 (ms)"
+            }
+          ]
+        ]
+      }
+    },
+    {
+      "type": "metric",
+      "x": 16,
+      "y": 1,
+      "width": 4,
+      "height": 3,
+      "properties": {
+        "title": "API Requests",
+        "view": "singleValue",
+        "region": "${AWS::Region}",
+        "setPeriodToTimeRange": true,
+        "metrics": [
+          [
+            "AWS/ApiGateway",
+            "Count",
+            "ApiName",
+            "ai-gateway",
+            "Stage",
+            "v1",
+            {
+              "stat": "Sum",
+              "label": "Total"
+            }
+          ]
+        ],
+        "stat": "Sum"
+      }
+    },
+    {
+      "type": "metric",
+      "x": 20,
+      "y": 1,
+      "width": 2,
+      "height": 3,
+      "properties": {
+        "title": "4XX",
+        "view": "singleValue",
+        "region": "${AWS::Region}",
+        "setPeriodToTimeRange": true,
+        "metrics": [
+          [
+            "AWS/ApiGateway",
+            "4XXError",
+            "ApiName",
+            "ai-gateway",
+            "Stage",
+            "v1",
+            {
+              "stat": "Sum",
+              "label": "Throttled/Auth"
+            }
+          ]
+        ],
+        "stat": "Sum"
+      }
+    },
+    {
+      "type": "metric",
+      "x": 22,
+      "y": 1,
+      "width": 2,
+      "height": 3,
+      "properties": {
+        "title": "5XX",
+        "view": "singleValue",
+        "region": "${AWS::Region}",
+        "setPeriodToTimeRange": true,
+        "metrics": [
+          [
+            "AWS/ApiGateway",
+            "5XXError",
+            "ApiName",
+            "ai-gateway",
+            "Stage",
+            "v1",
+            {
+              "stat": "Sum",
+              "label": "Server Errors"
+            }
+          ]
+        ],
+        "stat": "Sum"
+      }
+    },
+    {
+      "type": "metric",
+      "x": 0,
+      "y": 4,
+      "width": 12,
+      "height": 7,
+      "properties": {
+        "title": "API Traffic Over Time",
+        "view": "timeSeries",
+        "region": "${AWS::Region}",
+        "metrics": [
+          [
+            "AWS/ApiGateway",
+            "Count",
+            "ApiName",
+            "ai-gateway",
+            "Stage",
+            "v1",
+            {
+              "stat": "Sum",
+              "label": "Total Requests"
+            }
+          ],
+          [
+            "AWS/ApiGateway",
+            "4XXError",
+            "ApiName",
+            "ai-gateway",
+            "Stage",
+            "v1",
+            {
+              "stat": "Sum",
+              "label": "4XX (Throttled/Auth)"
+            }
+          ],
+          [
+            "AWS/ApiGateway",
+            "5XXError",
+            "ApiName",
+            "ai-gateway",
+            "Stage",
+            "v1",
+            {
+              "stat": "Sum",
+              "label": "5XX (Server Errors)"
+            }
+          ]
+        ],
+        "period": 60,
+        "stat": "Sum",
+        "yAxis": {
+          "left": {
+            "label": "Count",
+            "showUnits": false
+          }
+        }
+      }
+    },
+    {
+      "type": "metric",
+      "x": 12,
+      "y": 4,
+      "width": 12,
+      "height": 7,
+      "properties": {
+        "title": "Bedrock Latency Over Time (p50 / p95)",
+        "view": "timeSeries",
+        "region": "${AWS::Region}",
+        "metrics": [
+          [
+            "AWS/Bedrock",
+            "InvocationLatency",
+            "ModelId",
+            "us.anthropic.claude-sonnet-4-6",
+            {
+              "stat": "p50",
+              "label": "p50"
+            }
+          ],
+          [
+            "AWS/Bedrock",
+            "InvocationLatency",
+            "ModelId",
+            "us.anthropic.claude-sonnet-4-6",
+            {
+              "stat": "p95",
+              "label": "p95"
+            }
+          ]
+        ],
+        "period": 300,
+        "yAxis": {
+          "left": {
+            "label": "Milliseconds",
+            "showUnits": false
+          }
+        }
+      }
+    },
+    {
+      "type": "metric",
+      "x": 0,
+      "y": 11,
+      "width": 12,
+      "height": 7,
+      "properties": {
+        "title": "Token Usage Over Time (All)",
+        "view": "timeSeries",
+        "stacked": true,
+        "region": "${AWS::Region}",
+        "metrics": [
+          [
+            "AWS/Bedrock",
+            "InputTokenCount",
+            "ModelId",
+            "us.anthropic.claude-sonnet-4-6",
+            {
+              "stat": "Sum",
+              "label": "Input Tokens"
+            }
+          ],
+          [
+            "AWS/Bedrock",
+            "OutputTokenCount",
+            "ModelId",
+            "us.anthropic.claude-sonnet-4-6",
+            {
+              "stat": "Sum",
+              "label": "Output Tokens"
+            }
+          ]
+        ],
+        "period": 300,
+        "stat": "Sum",
+        "yAxis": {
+          "left": {
+            "label": "Tokens",
+            "showUnits": false
+          }
+        }
+      }
+    },
+    {
+      "type": "log",
+      "x": 0,
+      "y": 30,
+      "width": 24,
+      "height": 5,
+      "properties": {
+        "title": "User Access Logs",
+        "region": "${AWS::Region}",
+        "query": "SOURCE '/aws/apigateway/${STACK_NAME}-access-logs' | fields @timestamp, user, ip, httpMethod, path, status\n| stats count(*) as requests by user, ip, if(user = '-', 'unauthenticated', 'authenticated') as access_type\n| sort requests desc\n| limit 20",
+        "view": "table"
+      }
+    },
+    {
+      "type": "log",
+      "x": 0,
+      "y": 35,
+      "width": 12,
+      "height": 6,
+      "properties": {
+        "title": "Agent Invocations",
+        "region": "${AWS::Region}",
+        "query": "SOURCE '/aws/bedrock-agentcore/runtimes/${AGENTCORE_RUNTIME_ID}-DEFAULT' | fields @timestamp, @message\n| filter @message like \"Invocation completed\"\n| stats count(*) as invocations by bin(5m)",
+        "view": "timeSeries"
+      }
+    },
+    {
+      "type": "log",
+      "x": 12,
+      "y": 35,
+      "width": 12,
+      "height": 6,
+      "properties": {
+        "title": "Agent Errors",
+        "region": "${AWS::Region}",
+        "query": "SOURCE '/aws/bedrock-agentcore/runtimes/${AGENTCORE_RUNTIME_ID}-DEFAULT' | fields @timestamp, @message\n| filter @message like \"ERROR\" or @message like \"Exception\" or @message like \"failed\"\n| sort @timestamp desc\n| limit 20",
+        "view": "table"
+      }
+    },
+    {
+      "type": "log",
+      "x": 0,
+      "y": 41,
+      "width": 12,
+      "height": 6,
+      "properties": {
+        "title": "MCP Tool Calls",
+        "region": "${AWS::Region}",
+        "query": "SOURCE '/aws/bedrock-agentcore/runtimes/${AGENTCORE_RUNTIME_ID}-DEFAULT' | fields @timestamp, @message\n| filter @message like \"search_kb\" or @message like \"create_ticket\"\n| stats count(*) as tool_calls by bin(5m)",
+        "view": "timeSeries"
+      }
+    },
+    {
+      "type": "log",
+      "x": 12,
+      "y": 41,
+      "width": 12,
+      "height": 6,
+      "properties": {
+        "title": "Memory Operations",
+        "region": "${AWS::Region}",
+        "query": "SOURCE '/aws/bedrock-agentcore/runtimes/${AGENTCORE_RUNTIME_ID}-DEFAULT' | fields @timestamp, @message\n| filter @message like \"MEMORY_OP\"\n| stats count(*) as memory_ops by bin(5m)",
+        "view": "timeSeries"
+      }
+    }
+  ]
+}

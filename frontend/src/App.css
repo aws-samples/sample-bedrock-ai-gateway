@@ -1,0 +1,72 @@
+/* Brand Colors */
+:root {
+  --brand-red: #ED1C24;
+  --brand-dark: #B71518;
+  --brand-black: #000000;
+  --brand-white: #FFFFFF;
+  --brand-light: #F5F5F5;
+  --brand-gray: #666666;
+}
+
+body {
+  font-family: 'Arial', 'Helvetica Neue', sans-serif;
+  background-color: var(--brand-light);
+  color: var(--brand-black);
+}
+
+/* Header */
+.app-header {
+  background-color: var(--brand-black);
+  padding: 15px 0;
+  margin-bottom: 0;
+  position: sticky;
+  top: 0;
+  z-index: 1000;
+  border-bottom: 3px solid var(--brand-red);
+}
+
+.app-header-title {
+  color: var(--brand-white);
+  font-size: 1.25rem;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+}
+
+/* Primary Button Styling */
+.btn-primary {
+  background-color: var(--brand-red);
+  border-color: var(--brand-red);
+  font-weight: 600;
+  padding: 12px 30px;
+}
+
+.btn-primary:hover {
+  background-color: var(--brand-dark);
+  border-color: var(--brand-dark);
+}
+
+/* Card Styling */
+.card {
+  border: none;
+  border-radius: 8px;
+}
+
+.card-body h2 {
+  color: var(--brand-black);
+  font-weight: 700;
+}
+
+/* Chat Interface */
+.chat-container {
+  background-color: white;
+  border-radius: 8px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+
+.chat-header {
+  background-color: var(--brand-red);
+  color: white;
+  padding: 15px 20px;
+  border-radius: 8px 8px 0 0;
+  font-weight: 600;
+}

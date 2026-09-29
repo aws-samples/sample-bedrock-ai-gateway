@@ -1,0 +1,3 @@
+# No external dependencies required.
+# The create_ticket Lambda uses only Python standard library modules
+# (json, datetime) to generate mock ServiceNow ticket responses.

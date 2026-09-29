@@ -1,0 +1,30 @@
+{
+  "tools": [
+    {
+      "name": "search_kb",
+      "description": "Search the knowledge base for relevant documents",
+      "type": "lambda",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "query": { "type": "string", "description": "Natural language search query" }
+        },
+        "required": ["query"]
+      }
+    },
+    {
+      "name": "create_ticket",
+      "description": "Create a ServiceNow incident ticket",
+      "type": "lambda",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "title": { "type": "string", "description": "Short title describing the incident" },
+          "priority": { "type": "string", "description": "Incident priority level. One of: P1, P2, P3, P4" },
+          "description": { "type": "string", "description": "Detailed description of the incident" }
+        },
+        "required": ["title", "priority"]
+      }
+    }
+  ]
+}

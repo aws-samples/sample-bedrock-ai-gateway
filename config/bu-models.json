@@ -1,0 +1,72 @@
+{
+  "_comment": [
+    "Business-unit to model entitlement matrix.",
+    "",
+    "An Application Inference Profile wraps exactly one model, so per-BU cost",
+    "attribution across several models needs one profile per (team, model) pair.",
+    "This file is the single declarative source for that matrix: scripts/create-aips.sh",
+    "creates the profiles and scripts/create-team-config-table.sh seeds them into the",
+    "ai-gateway-team-config DynamoDB table.",
+    "",
+    "profileName is explicit rather than derived. Profile names allow only",
+    "alphanumerics separated by single spaces, underscores or dashes (no dots or",
+    "colons), so a name cannot be mechanically generated from a model id without",
+    "lossy rewriting. Naming them here also lets existing profiles keep their names,",
+    "which matters because the CloudWatch dashboard references their ids.",
+    "",
+    "models is an allow-list. A business unit requesting a model that is not listed",
+    "for it is denied, so entitlement and attribution are configured in one place.",
+    "",
+    "defaultModel is used when a caller does not name a model (the agent plane",
+    "usually does not).",
+    "",
+    "modelPricing drives the estimated-cost widgets on the CloudWatch dashboard.",
+    "CloudWatch has no notion of token price, so cost is computed as metric math over",
+    "token counts. Rates are US on-demand USD per 1M tokens and must be updated by hand",
+    "when AWS changes them. These are estimates for real-time visibility; Cost Explorer",
+    "remains the billing source of truth."
+  ],
+
+  "modelPricing": {
+    "us.anthropic.claude-sonnet-4-6": { "inputPer1M": 3.0, "outputPer1M": 15.0 },
+    "us.anthropic.claude-haiku-4-5-20251001-v1:0": { "inputPer1M": 1.0, "outputPer1M": 5.0 },
+    "us.amazon.nova-lite-v1:0": { "inputPer1M": 0.06, "outputPer1M": 0.24 }
+  },
+
+  "businessUnits": [
+    {
+      "team": "Architecture",
+      "costCenter": "Architecture",
+      "budgetLimit": 5000,
+      "active": true,
+      "defaultModel": "us.anthropic.claude-sonnet-4-6",
+      "models": [
+        {
+          "modelId": "us.anthropic.claude-sonnet-4-6",
+          "profileName": "architecture"
+        },
+        {
+          "modelId": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+          "profileName": "architecture-claude-haiku-4-5"
+        }
+      ]
+    },
+    {
+      "team": "IT-Operations",
+      "costCenter": "IT-Operations",
+      "budgetLimit": 10000,
+      "active": true,
+      "defaultModel": "us.anthropic.claude-sonnet-4-6",
+      "models": [
+        {
+          "modelId": "us.anthropic.claude-sonnet-4-6",
+          "profileName": "it-operations"
+        },
+        {
+          "modelId": "us.amazon.nova-lite-v1:0",
+          "profileName": "it-operations-nova-lite"
+        }
+      ]
+    }
+  ]
+}

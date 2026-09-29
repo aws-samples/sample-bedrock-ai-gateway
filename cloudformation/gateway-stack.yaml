@@ -1,0 +1,1119 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'AI Gateway POC - API Gateway + Cognito + Streaming Lambda'
+
+Parameters:
+  CognitoDomainPrefix:
+    Type: String
+    Default: 'ai-gateway-poc'
+    Description: Domain prefix for Cognito Hosted UI (must be globally unique)
+
+  CallbackURL:
+    Type: String
+    Default: 'http://localhost:3000/callback'
+    Description: Local development OAuth2 callback URL
+
+  LogoutURL:
+    Type: String
+    Default: 'http://localhost:3000'
+    Description: Local development OAuth2 logout URL
+
+  # The frontend lives behind CloudFront, which is created by a separate stack
+  # deployed after this one, so its URL is not known on a first deploy. It used to be
+  # patched in afterwards by scripts/configure-cognito-oauth.sh, which left the app
+  # client permanently drifted from this template and meant any stack update silently
+  # reverted the login URLs to localhost. Passing the URL here instead makes the
+  # template authoritative and the update idempotent. Leave empty on a first deploy.
+  FrontendURL:
+    Type: String
+    Default: ''
+    Description: >-
+      Frontend origin, e.g. https://d123.cloudfront.net (no trailing slash).
+      Appended to the OAuth2 callback and logout URL lists when set.
+
+Conditions:
+  HasFrontendURL: !Not [!Equals [!Ref FrontendURL, '']]
+
+Resources:
+  # ============================================================
+  # Cognito User Pool
+  # ============================================================
+  CognitoUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: AIGatewayPOC-UserPool
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: true
+      AutoVerifiedAttributes:
+        - email
+      UsernameAttributes:
+        - email
+      Schema:
+        - Name: email
+          Required: true
+          Mutable: true
+          AttributeDataType: String
+        - Name: team
+          Required: false
+          Mutable: true
+          AttributeDataType: String
+          StringAttributeConstraints:
+            MinLength: '0'
+            MaxLength: '256'
+        - Name: role
+          Required: false
+          Mutable: true
+          AttributeDataType: String
+          StringAttributeConstraints:
+            MinLength: '0'
+            MaxLength: '256'
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireUppercase: true
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: true
+      UserPoolTags:
+        Application: AIGatewayPOC
+        CostCenter: IT-Operations
+
+  # ============================================================
+  # Cognito User Pool Client
+  # ============================================================
+  CognitoUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    DependsOn: CognitoUserPoolDomain
+    Properties:
+      ClientName: AIGatewayPOC
+      UserPoolId: !Ref CognitoUserPool
+      GenerateSecret: false
+      ExplicitAuthFlows:
+        - ALLOW_REFRESH_TOKEN_AUTH
+        - ALLOW_USER_SRP_AUTH
+      AllowedOAuthFlows:
+        - code
+      AllowedOAuthScopes:
+        - openid
+        - profile
+        - email
+      AllowedOAuthFlowsUserPoolClient: true
+      SupportedIdentityProviders:
+        - COGNITO
+      # Order is significant only for keeping this list identical to what is already
+      # deployed, so a reconciling update reports no change on these properties.
+      CallbackURLs: !If
+        - HasFrontendURL
+        - [!Ref CallbackURL, !Sub '${FrontendURL}/callback']
+        - [!Ref CallbackURL]
+      LogoutURLs: !If
+        - HasFrontendURL
+        - [!Ref LogoutURL, !Ref FrontendURL]
+        - [!Ref LogoutURL]
+
+  # ============================================================
+  # Cognito User Pool Domain (Hosted UI)
+  # ============================================================
+  CognitoUserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      Domain: !Ref CognitoDomainPrefix
+      UserPoolId: !Ref CognitoUserPool
+
+  # ============================================================
+  # API Gateway REST API (REGIONAL)
+  # ============================================================
+  BedrockApiGateway:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: ai-gateway
+      Description: AI Gateway for Amazon Bedrock POC
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+      Tags:
+        - Key: Application
+          Value: AIGatewayPOC
+        - Key: CostCenter
+          Value: IT-Operations
+
+  # ============================================================
+  # Cognito Authorizer (native API Gateway integration)
+  # ============================================================
+  CognitoAuthorizer:
+    Type: AWS::ApiGateway::Authorizer
+    Properties:
+      Name: CognitoAuthorizer
+      RestApiId: !Ref BedrockApiGateway
+      Type: COGNITO_USER_POOLS
+      IdentitySource: method.request.header.Authorization
+      ProviderARNs:
+        - !GetAtt CognitoUserPool.Arn
+
+  # ============================================================
+  # Proxy Resource {proxy+}
+  # ============================================================
+  BedrockApiGatewayProxyResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref BedrockApiGateway
+      ParentId: !GetAtt BedrockApiGateway.RootResourceId
+      PathPart: '{proxy+}'
+
+  # ============================================================
+  # OPTIONS Method (CORS preflight - no auth)
+  # ============================================================
+  BedrockApiGatewayOptionsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref BedrockApiGateway
+      ResourceId: !Ref BedrockApiGatewayProxyResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,Authorization,X-Api-Key'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,POST,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+            ResponseTemplates:
+              application/json: ''
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
+  # ============================================================
+  # ANY Method (proxy to streaming Lambda, Cognito auth)
+  # ============================================================
+  BedrockApiGatewayAnyMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref BedrockApiGateway
+      ResourceId: !Ref BedrockApiGatewayProxyResource
+      HttpMethod: ANY
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref CognitoAuthorizer
+      ApiKeyRequired: true
+      Integration:
+        Type: AWS_PROXY
+        ResponseTransferMode: STREAM
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2021-11-15/functions/${IntegrationLambda.Arn}/response-streaming-invocations
+      RequestParameters:
+        method.request.path.proxy: true
+
+  # ============================================================
+  # API Gateway Deployment
+  # ============================================================
+  BedrockApiGatewayDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - BedrockApiGatewayOptionsMethod
+      - BedrockApiGatewayAnyMethod
+    Properties:
+      RestApiId: !Ref BedrockApiGateway
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W68
+            reason: >
+              Usage Plans are configured via scripts/configure-usage-plans.sh at
+              deploy time, not in this template. Associating the deployment with a
+              usage plan in CFN would create a circular dependency.
+
+  # ============================================================
+  # API Gateway Stage (v1)
+  # ============================================================
+  AccessLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/apigateway/${AWS::StackName}-access-logs
+      RetentionInDays: 30
+      Tags:
+        - Key: Application
+          Value: AIGatewayPOC
+        - Key: CostCenter
+          Value: IT-Operations
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W84
+            reason: >
+              KMS encryption for CloudWatch Log Groups requires a customer-managed
+              key, adding operational overhead and cost inappropriate for a sample.
+              Enable KMS log encryption in production deployments.
+      checkov:
+        skip:
+          - id: CKV_AWS_158
+            comment: >
+              KMS encryption for CW Log Groups adds cost and operational overhead
+              inappropriate for a sample. Enable in production.
+
+  ApiGatewayCloudWatchRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${AWS::StackName}-ApiGwLogsRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: apigateway.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs
+      Tags:
+        - Key: Application
+          Value: AIGatewayPOC
+        - Key: CostCenter
+          Value: IT-Operations
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W28
+            reason: Explicit name required so deploy scripts can reference the role by name.
+
+  ApiGatewayAccount:
+    Type: AWS::ApiGateway::Account
+    DependsOn: ApiGatewayCloudWatchRole
+    Properties:
+      CloudWatchRoleArn: !GetAtt ApiGatewayCloudWatchRole.Arn
+
+  BedrockApiGatewayStage:
+    Type: AWS::ApiGateway::Stage
+    DependsOn: ApiGatewayAccount
+    Properties:
+      RestApiId: !Ref BedrockApiGateway
+      DeploymentId: !Ref BedrockApiGatewayDeployment
+      StageName: v1
+      TracingEnabled: true
+      AccessLogSetting:
+        DestinationArn: !GetAtt AccessLogGroup.Arn
+        Format: '{"requestId":"$context.requestId","ip":"$context.identity.sourceIp","user":"$context.authorizer.claims.email","requestTime":"$context.requestTime","httpMethod":"$context.httpMethod","path":"$context.path","status":"$context.status","responseLength":"$context.responseLength","userAgent":"$context.identity.userAgent"}'
+      Tags:
+        - Key: Application
+          Value: AIGatewayPOC
+        - Key: CostCenter
+          Value: IT-Operations
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W64
+            reason: >
+              Usage Plans are applied via scripts/configure-usage-plans.sh at
+              deploy time. Associating the stage with a usage plan inside this
+              template would create a circular dependency with the deployment.
+      checkov:
+        skip:
+          - id: CKV_AWS_73
+            comment: >
+              X-Ray tracing adds cost. CloudWatch access logging is already
+              enabled. Enable X-Ray in production for distributed tracing.
+          - id: CKV_AWS_120
+            comment: >
+              API Gateway caching is disabled — Bedrock streaming responses
+              cannot be cached. Caching would break the streaming path.
+
+  # ============================================================
+  # Gateway Response: 401 Unauthorized (with CORS headers)
+  # ============================================================
+  UnauthorizedGatewayResponse:
+    Type: AWS::ApiGateway::GatewayResponse
+    Properties:
+      RestApiId: !Ref BedrockApiGateway
+      ResponseType: UNAUTHORIZED
+      StatusCode: '401'
+      ResponseParameters:
+        gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
+        gatewayresponse.header.Access-Control-Allow-Headers: "'Content-Type,Authorization,X-Api-Key'"
+        gatewayresponse.header.Access-Control-Allow-Methods: "'GET,POST,OPTIONS'"
+
+  # ============================================================
+  # Gateway Response: 403 Access Denied (with CORS headers)
+  # ============================================================
+  AccessDeniedGatewayResponse:
+    Type: AWS::ApiGateway::GatewayResponse
+    Properties:
+      RestApiId: !Ref BedrockApiGateway
+      ResponseType: ACCESS_DENIED
+      StatusCode: '403'
+      ResponseParameters:
+        gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
+        gatewayresponse.header.Access-Control-Allow-Headers: "'Content-Type,Authorization,X-Api-Key'"
+        gatewayresponse.header.Access-Control-Allow-Methods: "'GET,POST,OPTIONS'"
+
+  # ============================================================
+  # Streaming Integration Lambda (Node.js)
+  # Proxies requests to Bedrock ConverseStream API
+  # ============================================================
+  IntegrationLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-StreamingProxy
+      Handler: index.handler
+      Role: !GetAtt IntegrationLambdaRole.Arn
+      Runtime: nodejs22.x
+      Timeout: 300
+      MemorySize: 256
+      Tags:
+        - Key: Application
+          Value: AIGatewayPOC
+        - Key: CostCenter
+          Value: IT-Operations
+      Code:
+        ZipFile: |
+          const { BedrockRuntimeClient, ConverseStreamCommand } = require('@aws-sdk/client-bedrock-runtime');
+          const { DynamoDBClient, GetItemCommand } = require('@aws-sdk/client-dynamodb');
+
+          const bedrockClient = new BedrockRuntimeClient({ region: process.env.AWS_REGION });
+          const dynamoClient = new DynamoDBClient({ region: process.env.AWS_REGION });
+          const TEAM_CONFIG_TABLE = process.env.TEAM_CONFIG_TABLE || 'ai-gateway-team-config';
+
+          // Current month key e.g. "2025-08" — used for month-rollover detection in budget check.
+          function currentMonthKey() {
+              const now = new Date();
+              return `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`;
+          }
+
+          exports.handler = awslambda.streamifyResponse(async (event, responseStream, context) => {
+              try {
+                  // Handle OPTIONS preflight
+                  if (event.httpMethod === 'OPTIONS') {
+                      const metadata = {
+                          statusCode: 200,
+                          headers: {
+                              "Access-Control-Allow-Origin": "*",
+                              "Access-Control-Allow-Headers": "Content-Type,Authorization,X-Api-Key",
+                              "Access-Control-Allow-Methods": "GET,POST,OPTIONS"
+                          }
+                      };
+                      responseStream = awslambda.HttpResponseStream.from(responseStream, metadata);
+                      responseStream.end();
+                      return;
+                  }
+
+                  console.log('Event path:', event.path);
+                  console.log('Event httpMethod:', event.httpMethod);
+
+                  // Extract model ID from path: /v1/model/{modelId}/converse-stream
+                  const pathParts = event.path.split('/');
+                  const modelIndex = pathParts.indexOf('model');
+                  let modelId = modelIndex >= 0 ? pathParts[modelIndex + 1] : pathParts[2];
+
+                  // Read user's team from Cognito authorizer claims
+                  const claims = event.requestContext?.authorizer?.claims || {};
+                  const userTeam = (claims['custom:team'] || '').trim();
+                  const userEmail = claims['email'] || 'unknown';
+                  console.log(`User: ${userEmail}, Team: ${userTeam}`);
+
+                  // The model the caller asked for, before any profile substitution.
+                  const requestedModel = modelId;
+
+                  // Emit a 4xx and stop.
+                  const deny = (message, statusCode = 403) => {
+                      console.log(`DENY (${statusCode}): ${message}`);
+                      const errMeta = { statusCode, headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } };
+                      responseStream = awslambda.HttpResponseStream.from(responseStream, errMeta);
+                      responseStream.write(JSON.stringify({ error: message }));
+                      responseStream.end();
+                  };
+
+                  // resolvedModel tracks the actual model/AIP used, for pricing after stream.
+                  let resolvedModel = requestedModel;
+
+                  // Resolve (team, requested model) -> Application Inference Profile
+                  // and perform pre-request budget check.
+                  if (userTeam) {
+                      try {
+                          const teamConfig = await dynamoClient.send(new GetItemCommand({
+                              TableName: TEAM_CONFIG_TABLE,
+                              Key: { team: { S: userTeam } }
+                          }));
+                          const item = teamConfig.Item;
+
+                          if (!item) {
+                              console.log(`Team '${userTeam}' not found in config — using default model`);
+                          } else if (item.active?.BOOL !== true) {
+                              deny(`Team '${userTeam}' is not provisioned for AI Gateway access`);
+                              return;
+                          } else {
+                              // ── Budget check ──────────────────────────────────────────────
+                              // budget_limit = 0 or absent → unlimited (enforcement disabled).
+                              const budgetLimit = parseFloat(item.budget_limit?.N || '0');
+                              if (budgetLimit > 0) {
+                                  const thisMonth = currentMonthKey();
+                                  const storedMonth = item.month_key?.S || '';
+                                  // Auto-reset: if the stored month differs from now, the
+                                  // counter is from a previous period — treat as 0 rather
+                                  // than blocking the whole team for a stale counter.
+                                  const monthSpend = storedMonth === thisMonth
+                                      ? parseFloat(item.month_spend?.N || '0')
+                                      : 0;
+
+                                  if (monthSpend >= budgetLimit) {
+                                      deny(
+                                          `Team '${userTeam}' has exceeded its monthly budget ` +
+                                          `($${monthSpend.toFixed(4)} / $${budgetLimit.toFixed(2)}). ` +
+                                          `Budget resets on the 1st of next month.`,
+                                          429
+                                      );
+                                      return;
+                                  }
+                                  console.log(`Budget check OK: ${userTeam} $${monthSpend.toFixed(4)} / $${budgetLimit.toFixed(2)}`);
+                              }
+
+                              // ── Model / AIP resolution ────────────────────────────────────
+                              const models = {};
+                              for (const [k, v] of Object.entries(item.models?.M || {})) {
+                                  const arn = v?.S?.trim();
+                                  if (arn) { models[k] = arn; }
+                              }
+                              const modelKeys = Object.keys(models);
+
+                              if (modelKeys.length > 0) {
+                                  const wanted = requestedModel || item.default_model?.S?.trim();
+                                  const arn = models[wanted];
+                                  if (!arn) {
+                                      deny(`Team '${userTeam}' is not entitled to model '${wanted}'. Entitled models: ${modelKeys.sort().join(', ')}`);
+                                      return;
+                                  }
+                                  console.log(`Routing to AIP: ${arn} (team: ${userTeam}, model: ${wanted})`);
+                                  modelId = arn;
+                                  resolvedModel = wanted;
+                              } else {
+                                  // Legacy row predating the models map.
+                                  const aipArn = item.aip_arn?.S?.trim();
+                                  if (aipArn) {
+                                      console.log(`Routing to AIP: ${aipArn} (team: ${userTeam}, legacy single-model row)`);
+                                      modelId = aipArn;
+                                  }
+                              }
+                          }
+                      } catch (dbErr) {
+                          console.warn(`DynamoDB lookup failed (non-fatal): ${dbErr.message}`);
+                      }
+                  }
+
+                  // Parse request body
+                  const body = JSON.parse(event.body);
+
+                  const command = new ConverseStreamCommand({
+                      modelId: modelId,
+                      messages: body.messages,
+                      ...(body.system && { system: body.system }),
+                      ...(body.inferenceConfig && { inferenceConfig: body.inferenceConfig }),
+                      ...(body.toolConfig && { toolConfig: body.toolConfig }),
+                      ...(body.additionalModelRequestFields && { additionalModelRequestFields: body.additionalModelRequestFields })
+                  });
+
+                  const response = await bedrockClient.send(command);
+
+                  const metadata = {
+                      statusCode: 200,
+                      headers: {
+                          "Content-Type": "text/event-stream",
+                          "Cache-Control": "no-cache",
+                          "Access-Control-Allow-Origin": "*",
+                          "Access-Control-Allow-Headers": "Content-Type,Authorization,X-Api-Key",
+                          "Access-Control-Allow-Methods": "GET,POST,OPTIONS"
+                      }
+                  };
+
+                  responseStream = awslambda.HttpResponseStream.from(responseStream, metadata);
+
+                  // Stream Bedrock response as Server-Sent Events.
+                  for await (const evt of response.stream) {
+                      responseStream.write(`data: ${JSON.stringify(evt)}\n\n`);
+                  }
+
+                  responseStream.write('data: [DONE]\n\n');
+                  responseStream.end();
+                  // Spend tracking is handled asynchronously by SpendAggregatorLambda
+                  // (EventBridge every 2 min), which reads AWS/Bedrock CloudWatch metrics
+                  // per AIP profile and updates month_spend in DynamoDB. No DynamoDB
+                  // write happens here — the proxy only reads.
+
+              } catch (error) {
+                  console.error('Handler error:', error);
+
+                  const errorMetadata = {
+                      statusCode: error.$metadata?.httpStatusCode || 500,
+                      headers: {
+                          "Content-Type": "application/json",
+                          "Access-Control-Allow-Origin": "*",
+                          "Access-Control-Allow-Headers": "Content-Type,Authorization,X-Api-Key",
+                          "Access-Control-Allow-Methods": "GET,POST,OPTIONS"
+                      }
+                  };
+
+                  responseStream = awslambda.HttpResponseStream.from(responseStream, errorMetadata);
+                  responseStream.write(JSON.stringify({
+                      error: error.message,
+                      code: error.name || 'InternalError'
+                  }));
+                  responseStream.end();
+              }
+          });
+      Environment:
+        Variables:
+          TEAM_CONFIG_TABLE: ai-gateway-team-config
+    Metadata:
+      guard:
+        SuppressedRules:
+          - LAMBDA_DLQ_CHECK  # Synchronously invoked by API Gateway — failures surface to the caller. DLQ only applies to async invocation paths.
+      cfn_nag:
+        rules_to_suppress:
+          - id: W89
+            reason: >
+              Lambda runs in a REGIONAL API Gateway — no VPC is provisioned in
+              this sample. Add VPC + private subnets + VPC endpoints in production.
+          - id: W92
+            reason: >
+              No concurrent execution limit set intentionally — this is a sample
+              with unpredictable, low traffic. Set ReservedConcurrentExecutions
+              based on actual load in production.
+      checkov:
+        skip:
+          - id: CKV_AWS_117
+            comment: No VPC in this sample. Add VPC + private subnets in production.
+          - id: CKV_AWS_115
+            comment: No concurrent limit — sample project. Set in production.
+          - id: CKV_AWS_116
+            comment: >
+              DLQ applies to async Lambda invocations. This Lambda is invoked
+              synchronously by API Gateway — DLQ would never receive messages.
+          - id: CKV_AWS_173
+            comment: >
+              No secrets in Lambda env vars — only the DynamoDB table name.
+              KMS encryption for env vars adds cost. Enable in production.
+
+  # ============================================================
+  # Integration Lambda IAM Role
+  # ============================================================
+  IntegrationLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${AWS::StackName}-StreamingProxyRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: BedrockInvokeAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                Resource: '*'
+        - PolicyName: DynamoDBTeamConfig
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                Resource: !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/ai-gateway-team-config'
+      Tags:
+        - Key: Application
+          Value: AIGatewayPOC
+        - Key: CostCenter
+          Value: IT-Operations
+    Metadata:
+      guard:
+        SuppressedRules:
+          - IAM_NO_INLINE_POLICY_CHECK  # Inline policies keep this sample self-contained. Extract to AWS::IAM::ManagedPolicy resources in production.
+      cfn_nag:
+        rules_to_suppress:
+          - id: W28
+            reason: Explicit name required so scripts and IAM policies can reference it.
+          - id: W11
+            reason: >
+              Bedrock does not support resource-level ARNs on InvokeModel or
+              InvokeModelWithResponseStream. Resource: '*' is the only valid
+              value per AWS documentation.
+
+  # ============================================================
+  # Lambda Permission for API Gateway invocation
+  # ============================================================
+  IntegrationLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref IntegrationLambda
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${BedrockApiGateway}/*/*/*
+
+  # ============================================================
+  # Monthly Budget Reset Lambda
+  # Runs on the 1st of each month via EventBridge scheduled rule.
+  # Resets month_spend = 0 and month_key = current YYYY-MM for
+  # every row in ai-gateway-team-config so budget enforcement
+  # starts fresh each billing period.
+  # ============================================================
+  BudgetResetRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${AWS::StackName}-BudgetResetRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DynamoDBBudgetReset
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:Scan
+                  - dynamodb:UpdateItem
+                Resource: !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/ai-gateway-team-config'
+      Tags:
+        - Key: Application
+          Value: AIGatewayPOC
+        - Key: CostCenter
+          Value: IT-Operations
+    Metadata:
+      guard:
+        SuppressedRules:
+          - IAM_NO_INLINE_POLICY_CHECK  # Inline policies keep this sample self-contained. Extract to AWS::IAM::ManagedPolicy resources in production.
+      cfn_nag:
+        rules_to_suppress:
+          - id: W28
+            reason: Explicit name required so scripts and teardown can reference the role.
+
+  BudgetResetLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-BudgetReset
+      Handler: index.handler
+      Role: !GetAtt BudgetResetRole.Arn
+      Runtime: python3.12
+      Timeout: 60
+      MemorySize: 128
+      Tags:
+        - Key: Application
+          Value: AIGatewayPOC
+        - Key: CostCenter
+          Value: IT-Operations
+      Environment:
+        Variables:
+          TEAM_CONFIG_TABLE: ai-gateway-team-config
+      Code:
+        ZipFile: |
+          import os
+          import boto3
+          from datetime import datetime, timezone
+
+          TABLE = os.environ.get('TEAM_CONFIG_TABLE', 'ai-gateway-team-config')
+
+          def handler(event, context):
+              ddb = boto3.client('dynamodb')
+              month_key = datetime.now(timezone.utc).strftime('%Y-%m')
+              print(f'Monthly budget reset starting — period: {month_key}')
+
+              # Scan all teams
+              items = []
+              resp = ddb.scan(TableName=TABLE, ProjectionExpression='team')
+              items.extend(resp.get('Items', []))
+              while 'LastEvaluatedKey' in resp:
+                  resp = ddb.scan(
+                      TableName=TABLE,
+                      ProjectionExpression='team',
+                      ExclusiveStartKey=resp['LastEvaluatedKey']
+                  )
+                  items.extend(resp.get('Items', []))
+
+              reset_count = 0
+              errors = []
+              for item in items:
+                  team = item['team']['S']
+                  try:
+                      ddb.update_item(
+                          TableName=TABLE,
+                          Key={'team': {'S': team}},
+                          UpdateExpression='SET month_spend = :zero, month_key = :mk',
+                          ExpressionAttributeValues={
+                              ':zero': {'N': '0'},
+                              ':mk':   {'S': month_key},
+                          },
+                      )
+                      reset_count += 1
+                      print(f'  Reset: {team}')
+                  except Exception as e:
+                      errors.append(f'{team}: {e}')
+                      print(f'  ERROR resetting {team}: {e}')
+
+              summary = {
+                  'period': month_key,
+                  'reset': reset_count,
+                  'errors': len(errors),
+              }
+              print(f'Monthly budget reset complete: {summary}')
+              if errors:
+                  raise RuntimeError(f'Reset failed for {len(errors)} team(s): {errors}')
+              return summary
+
+    Metadata:
+      guard:
+        SuppressedRules:
+          - LAMBDA_DLQ_CHECK  # EventBridge-invoked Lambda. Add an SQS DLQ and DeadLetterConfig in production so failed budget resets are captured and alertable.
+      cfn_nag:
+        rules_to_suppress:
+          - id: W89
+            reason: Sample project has no VPC. Add VPC + private subnets in production.
+          - id: W92
+            reason: No concurrent limit — low-frequency EventBridge cron. Set in production.
+      checkov:
+        skip:
+          - id: CKV_AWS_117
+            comment: No VPC in this sample. Add VPC + private subnets in production.
+          - id: CKV_AWS_115
+            comment: No concurrent limit — low-frequency cron. Set in production.
+          - id: CKV_AWS_116
+            comment: EventBridge-invoked Lambda — DLQ applies to async invocations only.
+          - id: CKV_AWS_173
+            comment: No secrets in env vars — only table name. Enable KMS in production.
+
+  BudgetResetSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub ${AWS::StackName}-monthly-budget-reset
+      Description: Reset per-BU month_spend on the 1st of each month at midnight UTC
+      ScheduleExpression: 'cron(0 0 1 * ? *)'
+      State: ENABLED
+      Targets:
+        - Id: BudgetResetLambdaTarget
+          Arn: !GetAtt BudgetResetLambda.Arn
+
+  BudgetResetLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref BudgetResetLambda
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt BudgetResetSchedule.Arn
+
+  # ============================================================
+  # Spend Aggregator Lambda
+  # Runs every 2 minutes via EventBridge. Reads AWS/Bedrock
+  # CloudWatch metrics per Application Inference Profile, maps
+  # them to business units via the DynamoDB team-config table
+  # (fully dynamic — no hardcoded team/profile mapping), computes
+  # month-to-date cost per team, and writes month_spend back to
+  # DynamoDB. The Streaming Proxy Lambda only reads month_spend
+  # for the budget check; all writes happen here.
+  # ============================================================
+  SpendAggregatorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${AWS::StackName}-SpendAggregatorRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: SpendAggregatorAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:Scan
+                  - dynamodb:UpdateItem
+                Resource: !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/ai-gateway-team-config'
+              - Effect: Allow
+                Action:
+                  - cloudwatch:GetMetricStatistics
+                Resource: '*'
+      Tags:
+        - Key: Application
+          Value: AIGatewayPOC
+        - Key: CostCenter
+          Value: IT-Operations
+    Metadata:
+      guard:
+        SuppressedRules:
+          - IAM_NO_INLINE_POLICY_CHECK  # Inline policies keep this sample self-contained. Extract to AWS::IAM::ManagedPolicy resources in production.
+      cfn_nag:
+        rules_to_suppress:
+          - id: W28
+            reason: Explicit name required so scripts and teardown can reference the role.
+          - id: W11
+            reason: >
+              cloudwatch:GetMetricStatistics does not support resource-level ARNs.
+              Resource: '*' is required per AWS documentation.
+
+  SpendAggregatorLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-SpendAggregator
+      Handler: index.handler
+      Role: !GetAtt SpendAggregatorRole.Arn
+      Runtime: python3.12
+      Timeout: 120
+      MemorySize: 256
+      Tags:
+        - Key: Application
+          Value: AIGatewayPOC
+        - Key: CostCenter
+          Value: IT-Operations
+      Environment:
+        Variables:
+          TEAM_CONFIG_TABLE: ai-gateway-team-config
+          BEDROCK_NAMESPACE: AWS/Bedrock
+      Code:
+        ZipFile: |
+          """
+          SpendAggregatorLambda — runs every 2 minutes via EventBridge.
+
+          Algorithm:
+          1. Scan ai-gateway-team-config to build {team: [{profile_id, model_id}]} map.
+             The models (M) attribute maps model_id -> AIP ARN; the profile_id is the
+             last segment of the ARN. No hardcoding — adding a team to DynamoDB is all
+             that is needed.
+          2. For each (team, profile_id) pair, call CloudWatch GetMetricStatistics for
+             InputTokenCount and OutputTokenCount from the start of the current month.
+          3. Look up per-model pricing from the PRICING constant (kept in sync with
+             config/bu-models.json modelPricing). Fall back to Sonnet rates if unknown.
+          4. Sum costs across all profiles for each team and write month_spend + month_key
+             to DynamoDB with a conditional that handles month rollover.
+
+          Idempotent: running multiple times in the same window produces the same result
+          because the metric query always covers the full month-to-date window.
+          """
+          import os
+          import boto3
+          from datetime import datetime, timezone, timedelta
+          from decimal import Decimal
+
+          TABLE   = os.environ.get('TEAM_CONFIG_TABLE', 'ai-gateway-team-config')
+          NS      = os.environ.get('BEDROCK_NAMESPACE',  'AWS/Bedrock')
+          REGION  = os.environ.get('AWS_REGION', 'us-east-1')
+
+          # Per-model pricing USD / 1M tokens — mirrors config/bu-models.json modelPricing.
+          # Add entries here when new models are added to the matrix.
+          PRICING = {
+              'us.anthropic.claude-sonnet-4-6':              {'in': 3.0,   'out': 15.0},
+              'us.anthropic.claude-haiku-4-5-20251001-v1:0': {'in': 1.0,   'out': 5.0},
+              'us.amazon.nova-lite-v1:0':                    {'in': 0.06,  'out': 0.24},
+          }
+          DEFAULT_PRICING = {'in': 3.0, 'out': 15.0}  # Sonnet rates as safe fallback
+
+          ddb = boto3.client('dynamodb', region_name=REGION)
+          cw  = boto3.client('cloudwatch', region_name=REGION)
+
+
+          def month_start_utc() -> datetime:
+              """Return midnight UTC on the 1st of the current month."""
+              now = datetime.now(timezone.utc)
+              return now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+
+          def current_month_key() -> str:
+              now = datetime.now(timezone.utc)
+              return f"{now.year}-{now.month:02d}"
+
+
+          def get_metric_sum(profile_id: str, metric_name: str, start: datetime, end: datetime) -> float:
+              """Return the month-to-date sum of a Bedrock metric for one AIP profile."""
+              resp = cw.get_metric_statistics(
+                  Namespace=NS,
+                  MetricName=metric_name,
+                  Dimensions=[{'Name': 'ModelId', 'Value': profile_id}],
+                  StartTime=start,
+                  EndTime=end,
+                  Period=max(60, int((end - start).total_seconds() // 60) * 60),  # must be multiple of 60
+                  Statistics=['Sum'],
+              )
+              datapoints = resp.get('Datapoints', [])
+              return sum(d['Sum'] for d in datapoints)
+
+
+          def build_team_profile_map() -> dict:
+              """
+              Scan DynamoDB and return:
+                {team_name: {'profiles': [{'profile_id': str, 'model_id': str}],
+                              'budget_limit': float}}
+              """
+              teams = {}
+              paginator_resp = ddb.scan(TableName=TABLE)
+              items = paginator_resp.get('Items', [])
+              while 'LastEvaluatedKey' in paginator_resp:
+                  paginator_resp = ddb.scan(
+                      TableName=TABLE,
+                      ExclusiveStartKey=paginator_resp['LastEvaluatedKey']
+                  )
+                  items.extend(paginator_resp.get('Items', []))
+
+              for item in items:
+                  team = item.get('team', {}).get('S', '')
+                  if not team:
+                      continue
+                  budget_limit = float(item.get('budget_limit', {}).get('N', '0'))
+                  profiles = []
+                  for model_id, arn_val in item.get('models', {}).get('M', {}).items():
+                      arn = arn_val.get('S', '').strip()
+                      if arn:
+                          profile_id = arn.rsplit('/', 1)[-1]
+                          profiles.append({'profile_id': profile_id, 'model_id': model_id})
+                  # Legacy single-model rows (aip_arn, no models map)
+                  if not profiles:
+                      arn = item.get('aip_arn', {}).get('S', '').strip()
+                      default_model = item.get('default_model', {}).get('S', '')
+                      if arn:
+                          profiles.append({'profile_id': arn.rsplit('/', 1)[-1], 'model_id': default_model})
+                  if profiles:
+                      teams[team] = {'profiles': profiles, 'budget_limit': budget_limit}
+              return teams
+
+
+          def handler(event, context):
+              now        = datetime.now(timezone.utc)
+              start      = month_start_utc()
+              month_key  = current_month_key()
+
+              print(f"SpendAggregator: computing month-to-date spend ({month_key}, "
+                    f"window {start.isoformat()} → {now.isoformat()})")
+
+              teams = build_team_profile_map()
+              print(f"  Teams found: {list(teams.keys())}")
+
+              results = {}
+              for team, info in teams.items():
+                  total_cost = 0.0
+                  for p in info['profiles']:
+                      pid   = p['profile_id']
+                      model = p['model_id']
+                      price = PRICING.get(model, DEFAULT_PRICING)
+                      inp   = get_metric_sum(pid, 'InputTokenCount',  start, now)
+                      out   = get_metric_sum(pid, 'OutputTokenCount', start, now)
+                      cost  = (inp * price['in'] + out * price['out']) / 1_000_000
+                      print(f"    {team}/{model} ({pid}): in={inp:.0f} out={out:.0f} cost=${cost:.6f}")
+                      total_cost += cost
+                  results[team] = total_cost
+
+              # Write to DynamoDB
+              errors = []
+              for team, total_cost in results.items():
+                  try:
+                      ddb.update_item(
+                          TableName=TABLE,
+                          Key={'team': {'S': team}},
+                          UpdateExpression='SET month_spend = :spend, month_key = :mk',
+                          ExpressionAttributeValues={
+                              ':spend': {'N': f'{total_cost:.6f}'},
+                              ':mk':    {'S': month_key},
+                          },
+                      )
+                      print(f"  Updated {team}: month_spend=${total_cost:.6f}")
+                  except Exception as e:
+                      errors.append(f'{team}: {e}')
+                      print(f"  ERROR updating {team}: {e}")
+
+              summary = {
+                  'month_key': month_key,
+                  'teams_updated': len(results) - len(errors),
+                  'errors': len(errors),
+                  'spend': {t: round(c, 6) for t, c in results.items()},
+              }
+              print(f"SpendAggregator complete: {summary}")
+              if errors:
+                  raise RuntimeError(f"Failed to update {len(errors)} team(s): {errors}")
+              return summary
+
+    Metadata:
+      guard:
+        SuppressedRules:
+          - LAMBDA_DLQ_CHECK  # EventBridge-invoked Lambda. Add an SQS DLQ and DeadLetterConfig in production so failed spend aggregation runs are captured and alertable.
+      cfn_nag:
+        rules_to_suppress:
+          - id: W89
+            reason: Sample project has no VPC. Add VPC + private subnets in production.
+          - id: W92
+            reason: No concurrent limit — low-frequency EventBridge cron. Set in production.
+      checkov:
+        skip:
+          - id: CKV_AWS_117
+            comment: No VPC in this sample. Add VPC + private subnets in production.
+          - id: CKV_AWS_115
+            comment: No concurrent limit — low-frequency cron. Set in production.
+          - id: CKV_AWS_116
+            comment: EventBridge-invoked Lambda — DLQ applies to async invocations only.
+          - id: CKV_AWS_173
+            comment: No secrets in env vars — only table name. Enable KMS in production.
+
+  SpendAggregatorSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub ${AWS::StackName}-spend-aggregator
+      Description: >-
+        Recompute per-BU month-to-date spend from AWS/Bedrock CloudWatch metrics
+        and write to DynamoDB every 2 minutes. Interval is configurable — reduce
+        to 1 min for tighter budget enforcement; increase to reduce CloudWatch API costs.
+      ScheduleExpression: 'rate(2 minutes)'
+      State: ENABLED
+      Targets:
+        - Id: SpendAggregatorLambdaTarget
+          Arn: !GetAtt SpendAggregatorLambda.Arn
+
+  SpendAggregatorLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref SpendAggregatorLambda
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt SpendAggregatorSchedule.Arn
+
+Outputs:
+  GatewayUrl:
+    Description: API Gateway invoke URL
+    Value: !Sub https://${BedrockApiGateway}.execute-api.${AWS::Region}.amazonaws.com/v1
+
+  ApiId:
+    Description: API Gateway ID
+    Value: !Ref BedrockApiGateway
+
+  AccessLogGroupName:
+    Description: CloudWatch Log Group for API Gateway access logs (contains user identity)
+    Value: !Ref AccessLogGroup
+
+  UserPoolId:
+    Description: Cognito User Pool ID
+    Value: !Ref CognitoUserPool
+
+  UserPoolArn:
+    Description: Cognito User Pool ARN
+    Value: !GetAtt CognitoUserPool.Arn
+
+  AppClientId:
+    Description: Cognito App Client ID
+    Value: !Ref CognitoUserPoolClient
+
+  CognitoDomain:
+    Description: Full Cognito Hosted UI domain URL
+    Value: !Sub https://${CognitoDomainPrefix}.auth.${AWS::Region}.amazoncognito.com

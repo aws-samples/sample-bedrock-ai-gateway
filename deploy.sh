@@ -160,6 +160,15 @@ GATEWAY_STACK="${COMPANY_NAME}-ai-gateway-${STAGE}"
 CUSTOM_LAMBDAS_STACK="${COMPANY_NAME}-mcp-tools-${STAGE}"
 FRONTEND_STACK="${COMPANY_NAME}-frontend-${STAGE}"
 
+# Fetch account ID once — used for the globally-unique Cognito domain prefix and the
+# .env.md deployment summary. Cognito hosted UI domain prefixes are globally unique across
+# all AWS accounts (like S3 bucket names), so a hardcoded default will eventually collide
+# when multiple teams deploy this sample. Appending the full account ID makes it unique
+# per-account without exceeding the 63-char Cognito domain limit.
+# Example: ai-gateway-poc-111122223333
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+COGNITO_DOMAIN_PREFIX="ai-gateway-${STAGE}-${ACCOUNT_ID}"
+
 # Export region and profile for all child scripts and AWS CLI calls
 export AWS_REGION="$REGION"
 export AWS_DEFAULT_REGION="$REGION"
@@ -270,22 +279,28 @@ EXISTING_CF_URL=$(aws cloudformation describe-stacks --stack-name "$FRONTEND_STA
   --query 'Stacks[0].Outputs[?OutputKey==`CloudFrontURL`].OutputValue' \
   --output text --region "$REGION" 2>/dev/null || echo "")
 
+# Check gateway stack status once — needed by both branches below.
+# UsePreviousValue is only valid on update-stack; create-stack rejects it.
+# On a fresh create (missing, ROLLBACK_COMPLETE, DELETE_FAILED) we pass an explicit
+# account-unique CognitoDomainPrefix so the same template works across any AWS account
+# without domain collisions. On an existing stack update we preserve the deployed value.
+GATEWAY_STACK_STATUS=$(aws cloudformation describe-stacks --stack-name "$GATEWAY_STACK" \
+  --query 'Stacks[0].StackStatus' --output text --region "$REGION" 2>/dev/null || echo "")
+
 if [ -n "$EXISTING_CF_URL" ] && [ "$EXISTING_CF_URL" != "None" ]; then
   # Normalise: the output is a bare domain, the parameter wants an origin.
   FRONTEND_ORIGIN="${EXISTING_CF_URL%/}"
   [[ "$FRONTEND_ORIGIN" != https://* ]] && FRONTEND_ORIGIN="https://${FRONTEND_ORIGIN}"
 
-  # UsePreviousValue is only valid on update-stack. deploy_stack deletes and re-creates a
-  # stack that is in ROLLBACK_COMPLETE or DELETE_FAILED, and create-stack rejects it — so
-  # the flag can only be used when the stack exists AND will actually be updated.
-  GATEWAY_STACK_STATUS=$(aws cloudformation describe-stacks --stack-name "$GATEWAY_STACK" \
-    --query 'Stacks[0].StackStatus' --output text --region "$REGION" 2>/dev/null || echo "")
-
   case "$GATEWAY_STACK_STATUS" in
     ""|ROLLBACK_COMPLETE|DELETE_FAILED)
-      GATEWAY_PARAMS=(--parameters "ParameterKey=FrontendURL,ParameterValue=${FRONTEND_ORIGIN}")
+      # Fresh create: pass account-unique domain prefix + frontend URL.
+      GATEWAY_PARAMS=(--parameters
+        "ParameterKey=FrontendURL,ParameterValue=${FRONTEND_ORIGIN}"
+        "ParameterKey=CognitoDomainPrefix,ParameterValue=${COGNITO_DOMAIN_PREFIX}")
       ;;
     *)
+      # Existing stack update: preserve all Cognito parameters as deployed.
       GATEWAY_PARAMS=(--parameters
         "ParameterKey=FrontendURL,ParameterValue=${FRONTEND_ORIGIN}"
         "ParameterKey=CognitoDomainPrefix,UsePreviousValue=true"
@@ -295,6 +310,14 @@ if [ -n "$EXISTING_CF_URL" ] && [ "$EXISTING_CF_URL" != "None" ]; then
   esac
   echo "  Passing FrontendURL=${FRONTEND_ORIGIN} so the template owns the OAuth URLs"
 else
+  case "$GATEWAY_STACK_STATUS" in
+    ""|ROLLBACK_COMPLETE|DELETE_FAILED)
+      # Fresh create with no frontend URL yet: pass domain prefix only.
+      # OAuth callback URLs will be patched in Step 8 once CloudFront is deployed.
+      GATEWAY_PARAMS=(--parameters "ParameterKey=CognitoDomainPrefix,ParameterValue=${COGNITO_DOMAIN_PREFIX}")
+      ;;
+    # Existing stack update with no new frontend URL: leave params alone (no --parameters).
+  esac
   echo "  ℹ️  Frontend stack not deployed yet — OAuth URLs will be patched in Step 8."
   echo "     Re-running deploy.sh afterwards lets the template take ownership."
 fi

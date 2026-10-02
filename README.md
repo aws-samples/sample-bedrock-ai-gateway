@@ -127,7 +127,7 @@ If you're using Docker instead, just ensure Docker Desktop is running before you
 | Parameter | Required | Description |
 |-----------|----------|-------------|
 | `--region` | Yes | AWS region to deploy into (e.g., `us-east-1`) |
-| `--stage` | Yes | Deployment stage name (use `poc`) |
+| `--stage` | Yes | Deployment stage name (use `poc`). Must be lowercase alphanumeric with hyphens only — no underscores or uppercase (e.g. `poc`, `dev`, `staging`). Uppercase or underscores will cause the Cognito domain creation to fail. |
 | `--alert-email` | Yes | Email for budget alert notifications and the admin Cognito username |
 | `--temp-password` | **Yes** | Temporary password for new Cognito users (Step 11). Must meet Cognito requirements: 8+ chars, uppercase, lowercase, number, symbol. Example: `TempPass@2026!` |
 

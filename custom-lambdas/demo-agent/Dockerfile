@@ -2,8 +2,12 @@
 #
 # AgentCore Runtime requires ARM64 images that listen on 0.0.0.0:8080 and
 # expose POST /invocations + GET /ping. BedrockAgentCoreApp provides both.
-FROM --platform=linux/arm64 public.ecr.aws/docker/library/python:3.12-slim
+FROM --platform=linux/arm64 python:3.12-slim
 # nosemgrep: avoid-platform-with-from — linux/arm64 is required by AgentCore Runtime; cannot use buildx --platform here
+# Using Docker Hub (python:3.12-slim) rather than public.ecr.aws mirror intentionally:
+# Finch's buildkit runs in a separate Lima VM and does not inherit finch-login credentials,
+# causing 403s against public.ecr.aws. Docker Hub public images need no authentication
+# and work identically with both Docker and Finch.
 
 WORKDIR /app
 

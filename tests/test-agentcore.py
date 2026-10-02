@@ -179,11 +179,11 @@ def check_memory(results: Results, session, region: str, cfg: dict):
     memory_id = (cfg.get("memory") or {}).get("memoryId")
 
     if not runtime_arn:
-        results.skip("agentRuntimeArn not in config — demo agent not deployed")
+        results.fail("agentRuntimeArn not in config — demo agent not deployed; run scripts/deploy-demo-agent.sh")
         print("")
         return
     if not memory_id:
-        results.skip("memory.memoryId not in config — Memory not deployed")
+        results.fail("memory.memoryId not in config — AgentCore Memory not deployed; run scripts/setup-agentcore-memory.py")
         print("")
         return
 
@@ -197,7 +197,7 @@ def check_memory(results: Results, session, region: str, cfg: dict):
         first = invoke_runtime(client, runtime_arn, MEMORY_FACT,
                                session_id, actor_id, runtime_sid)
         if not first.get("memory_enabled"):
-            results.skip("Runtime reports memory_enabled=false — Memory not wired into the agent")
+            results.fail("Runtime reports memory_enabled=false — Memory not wired into the agent; check AGENTCORE_MEMORY_ID env var in the runtime")
             print("")
             return
 
@@ -209,7 +209,7 @@ def check_memory(results: Results, session, region: str, cfg: dict):
                                 session_id, actor_id, runtime_sid)
     except (ClientError, BotoCoreError) as e:
         code = getattr(e, "response", {}).get("Error", {}).get("Code", type(e).__name__)
-        results.skip(f"Runtime invocation unavailable ({code}) — treating as not deployed")
+        results.fail(f"Runtime invocation failed ({code}) — agent is not reachable")
         print("")
         return
     except (KeyError, ValueError, json.JSONDecodeError) as e:
@@ -240,7 +240,7 @@ def check_registry(results: Results, session, region: str, cfg: dict):
     registry_id = registry.get("registryId")
 
     if not registry_id:
-        results.skip("registry.registryId not in config — Registry not deployed")
+        results.fail("registry.registryId not in config — Agent Registry not deployed; run scripts/setup-agent-registry.py")
         print("")
         return
 
@@ -273,7 +273,7 @@ def check_demo_agent_e2e(results: Results, session, region: str, cfg: dict):
     runtime_arn = cfg.get("agentRuntimeArn")
 
     if not runtime_arn:
-        results.skip("agentRuntimeArn not in config — demo agent not deployed")
+        results.fail("agentRuntimeArn not in config — demo agent not deployed; run scripts/deploy-demo-agent.sh")
         print("")
         return
 
@@ -286,7 +286,7 @@ def check_demo_agent_e2e(results: Results, session, region: str, cfg: dict):
                                   session_id, actor_id, runtime_session_id())
     except (ClientError, BotoCoreError) as e:
         code = getattr(e, "response", {}).get("Error", {}).get("Code", type(e).__name__)
-        results.skip(f"Runtime invocation unavailable ({code}) — treating as not deployed")
+        results.fail(f"Runtime invocation failed ({code}) — agent is not reachable")
         print("")
         return
     except (KeyError, ValueError, json.JSONDecodeError) as e:
@@ -334,7 +334,7 @@ def check_aip_attribution(results: Results, session, region: str, cfg: dict):
     runtime_arn = cfg.get("agentRuntimeArn")
 
     if not runtime_arn:
-        results.skip("agentRuntimeArn not in config — demo agent not deployed")
+        results.fail("agentRuntimeArn not in config — demo agent not deployed; run scripts/deploy-demo-agent.sh")
         print("")
         return
 
@@ -342,8 +342,7 @@ def check_aip_attribution(results: Results, session, region: str, cfg: dict):
     # them would break every time the matrix changes or the profiles are recreated.
     aip_map_path = os.path.join(os.path.dirname(DEFAULT_CONFIG), ".aip-map.json")
     if not os.path.exists(aip_map_path):
-        results.skip(".aip-map.json not found — run scripts/create-aips.sh to enable "
-                     "per-BU cost attribution")
+        results.fail(".aip-map.json not found — run scripts/create-aips.sh to enable per-BU cost attribution")
         print("")
         return
 
@@ -351,7 +350,7 @@ def check_aip_attribution(results: Results, session, region: str, cfg: dict):
         aip_map = json.load(f)
     known_profiles = {e["arn"].rsplit("/", 1)[-1]: e for e in aip_map}
     if not known_profiles:
-        results.skip(".aip-map.json is empty — no inference profiles to verify against")
+        results.fail(".aip-map.json is empty — no inference profiles to verify against")
         print("")
         return
 
@@ -364,7 +363,7 @@ def check_aip_attribution(results: Results, session, region: str, cfg: dict):
                                   session_id, actor_id, runtime_session_id())
     except (ClientError, BotoCoreError) as e:
         code = getattr(e, "response", {}).get("Error", {}).get("Code", type(e).__name__)
-        results.skip(f"Runtime invocation unavailable ({code}) — treating as not deployed")
+        results.fail(f"Runtime invocation failed ({code}) — agent is not reachable")
         print("")
         return
     except (KeyError, ValueError, json.JSONDecodeError) as e:
@@ -468,8 +467,8 @@ def main():
         print("💥 OVERALL: FAIL — Some AgentCore checks failed")
         sys.exit(1)
     if results.passed == 0:
-        print("⏭️  OVERALL: SKIPPED — No AgentCore resources deployed to validate")
-        sys.exit(0)
+        print("💥 OVERALL: FAIL — No AgentCore checks passed; nothing was validated")
+        sys.exit(1)
     print("🎉 OVERALL: PASS — AgentCore primitives validated successfully")
     sys.exit(0)
 

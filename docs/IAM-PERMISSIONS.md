@@ -329,11 +329,21 @@ The IAM user or role executing `deploy.sh` requires these permissions. This is t
         "bedrock-agentcore:ListAgentRuntimes",
         "bedrock-agentcore:ListAgentRuntimeEndpoints",
         "bedrock-agentcore:DeleteAgentRuntimeEndpoint",
-        "bedrock-agentcore:InvokeAgentRuntime"
+        "bedrock-agentcore:InvokeAgentRuntime",
+        "bedrock-agentcore:CreateRegistry",
+        "bedrock-agentcore:GetRegistry",
+        "bedrock-agentcore:ListRegistries",
+        "bedrock-agentcore:DeleteRegistry",
+        "bedrock-agentcore:CreateRegistryRecord",
+        "bedrock-agentcore:GetRegistryRecord",
+        "bedrock-agentcore:ListRegistryRecords",
+        "bedrock-agentcore:DeleteRegistryRecord",
+        "bedrock-agentcore:SearchRegistryRecords"
       ],
       "Resource": [
         "arn:aws:bedrock-agentcore:*:*:gateway/*",
-        "arn:aws:bedrock-agentcore:*:*:runtime/*"
+        "arn:aws:bedrock-agentcore:*:*:runtime/*",
+        "arn:aws:bedrock-agentcore:*:*:registry/*"
       ]
     },
     {
@@ -354,6 +364,15 @@ The IAM user or role executing `deploy.sh` requires these permissions. This is t
 > `bedrock-agentcore:CreateGateway`. The control plane (`aws bedrock-agentcore-control`) and
 > data plane (`aws bedrock-agentcore`) both authorize against this same `bedrock-agentcore:`
 > prefix.
+
+> **Agent Registry enrollment (preview):** AWS Agent Registry is a preview feature that
+> requires explicit account-level activation before the `ListRegistries`, `CreateRegistry`,
+> and related APIs are accessible — even for users with `AdministratorAccess`. The error
+> returned when not enrolled (`AccessDeniedException: not authorized to perform
+> bedrock-agentcore:ListRegistries`) looks identical to an IAM denial but is actually a
+> service enrollment gate. To enable it: **AWS Console → Amazon Bedrock → AgentCore →
+> Agent Registry → Enable for your account and region**. IAM actions in the
+> `AgentCoreManagement` Sid above are still required after enrollment.
 
 > **Remaining `Resource: *` entries explained:**
 > - `OpenSearchServerlessPolicies` — AOSS security/access policies are account-level resources with no ARN; AWS does not support resource scoping for these actions.

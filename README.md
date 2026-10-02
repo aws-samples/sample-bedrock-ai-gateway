@@ -79,6 +79,11 @@ pip3 install boto3 botocore requests opensearch-py requests-aws4auth
 pip3 install 'boto3>=1.43' 'bedrock-agentcore[strands-agents]>=1.0.3'
 ```
 
+### Agent Registry Enrollment (Preview Feature)
+
+AWS Agent Registry (Step 12a) is a preview feature that requires account-level activation before the API is accessible — even for users with `AdministratorAccess`. Without enrollment, Step 12a fails with `AccessDeniedException` on `bedrock-agentcore:ListRegistries`, which looks identical to an IAM error but is actually a service enrollment gate.
+
+Refer to the [AWS Agent Registry documentation](https://docs.aws.amazon.com/bedrock/latest/userguide/agent-registry.html) for current activation steps, as the onboarding process is actively evolving. Step 12a degrades gracefully if not enrolled — the rest of the deployment completes. See `docs/IAM-PERMISSIONS.md` for the required IAM actions once enrolled.
 
 ---
 
